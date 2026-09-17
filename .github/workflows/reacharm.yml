@@ -1,13 +1,10 @@
 name: reacharm
 on: workflow_dispatch
-permissions:
-  contents: read
-  pages: write
-  id-token: write
-  actions: write
+permissions: { contents: read, pages: write, id-token: write, actions: write }
 jobs:
   probe:
     runs-on: ubuntu-latest
+    environment: { name: github-pages }
     steps:
       - run: mkdir -p s && echo ok > s/index.html && tar -czf art.tar.gz -C s .
       - uses: actions/upload-artifact@v4
@@ -16,47 +13,42 @@ jobs:
         with: { name: art-b, path: art.tar.gz }
       - name: arms
         env:
-          GH: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
         run: |
+          set -u
           R=$GITHUB_REPOSITORY; S=$GITHUB_SHA
-          API=https://api.github.com
-          T=$(curl -s -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-               "$ACTIONS_ID_TOKEN_REQUEST_URL" | jq -r .value)
+          A=https://api.github.com
+          API="$A/repos/$R/pages/deployments"
+          H=(-H "Authorization: token $GH_TOKEN" -H "Accept: application/vnd.github+json")
+          T=$(curl -s -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL" | jq -r .value)
           echo "OIDC_LEN=${#T}"
-          curl -s -H "Authorization: token $GH" "$API/repos/$R/actions/runs/$GITHUB_RUN_ID/artifacts" > arts.json
+          curl -s "${H[@]}" "$A/repos/$R/actions/runs/$GITHUB_RUN_ID/artifacts" > arts.json
           IDA=$(jq -r '.artifacts[]|select(.name=="art-a").id' arts.json)
           IDB=$(jq -r '.artifacts[]|select(.name=="art-b").id' arts.json)
           echo "IDA=$IDA IDB=$IDB"
           U="https://example.com/zzq-reacharm-0917"
 
+          echo "===== ARM 3 (VALIDATOR CONTROL): artifact_url ONLY -> must be REFUSED 400 ====="
+          jq -nc --arg u "$U" --arg s "$S" --arg t "$T" \
+            '{artifact_url:$u,pages_build_version:$s,oidc_token:$t,environment:"github-pages"}' > c.json
+          curl -s -o c.out -w "ARM3_HTTP=%{http_code}\n" "${H[@]}" -X POST "$API" -d @c.json
+          echo "ARM3_BODY=$(tr -d '\n' < c.out)"
+
           echo "===== ARM 1: artifact_id + artifact_url, artifact DELETED right after the POST ====="
           jq -nc --argjson id "$IDA" --arg u "$U" --arg s "$S" --arg t "$T" \
             '{artifact_id:$id,artifact_url:$u,pages_build_version:$s,oidc_token:$t,environment:"github-pages"}' > a.json
-          curl -s -o a.out -w "ARM1_HTTP=%{http_code}\n" -X POST -H "Content-Type: application/json" \
-            -d @a.json "$API/repos/$R/pages/deployments"
-          curl -s -o /dev/null -w "ARM1_ARTIFACT_DELETE=%{http_code}\n" -X DELETE \
-            -H "Authorization: token $GH" "$API/repos/$R/actions/artifacts/$IDA"
+          curl -s -o a.out -w "ARM1_HTTP=%{http_code}\n" "${H[@]}" -X POST "$API" -d @a.json
+          curl -s -o /dev/null -w "ARM1_ARTIFACT_DELETE=%{http_code}\n" -X DELETE "${H[@]}" "$A/repos/$R/actions/artifacts/$IDA"
           echo "ARM1_BODY=$(tr -d '\n' < a.out)"
-
-          sleep 25
           SU=$(jq -r '.status_url // empty' a.out)
-          [ -n "$SU" ] && for i in 1 2 3 4; do
-            echo "ARM1_STATUS_$i=$(curl -s -H "Authorization: token $GH" "$SU")"; sleep 12; done
+          for i in 1 2 3 4 5; do sleep 15
+            [ -n "$SU" ] && echo "ARM1_STATUS_$i=$(curl -s "${H[@]}" "$SU" | tr -d '\n')"; done
 
           echo "===== ARM 2 (RIG CONTROL): same shape, artifact LEFT INTACT ====="
           jq -nc --argjson id "$IDB" --arg u "$U" --arg s "$S" --arg t "$T" \
             '{artifact_id:$id,artifact_url:$u,pages_build_version:$s,oidc_token:$t,environment:"github-pages"}' > b.json
-          curl -s -o b.out -w "ARM2_HTTP=%{http_code}\n" -X POST -H "Content-Type: application/json" \
-            -d @b.json "$API/repos/$R/pages/deployments"
+          curl -s -o b.out -w "ARM2_HTTP=%{http_code}\n" "${H[@]}" -X POST "$API" -d @b.json
           echo "ARM2_BODY=$(tr -d '\n' < b.out)"
-          sleep 25
           SU2=$(jq -r '.status_url // empty' b.out)
-          [ -n "$SU2" ] && for i in 1 2 3 4; do
-            echo "ARM2_STATUS_$i=$(curl -s -H "Authorization: token $GH" "$SU2")"; sleep 12; done
-
-          echo "===== ARM 3 (VALIDATOR CONTROL): artifact_url ONLY, must be REFUSED ====="
-          jq -nc --arg u "$U" --arg s "$S" --arg t "$T" \
-            '{artifact_url:$u,pages_build_version:$s,oidc_token:$t,environment:"github-pages"}' > c.json
-          curl -s -o c.out -w "ARM3_HTTP=%{http_code}\n" -X POST -H "Content-Type: application/json" \
-            -d @c.json "$API/repos/$R/pages/deployments"
-          echo "ARM3_BODY=$(tr -d '\n' < c.out)"
+          for i in 1 2 3 4 5; do sleep 15
+            [ -n "$SU2" ] && echo "ARM2_STATUS_$i=$(curl -s "${H[@]}" "$SU2" | tr -d '\n')"; done
