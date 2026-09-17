@@ -26,6 +26,12 @@ jobs:
         with: { name: f6, path: art.tar.gz }
       - uses: actions/upload-artifact@v4
         with: { name: f7, path: art.tar.gz }
+      - uses: actions/upload-artifact@v4
+        with: { name: f8, path: art.tar.gz }
+      - uses: actions/upload-artifact@v4
+        with: { name: f9, path: art.tar.gz }
+      - uses: actions/upload-artifact@v4
+        with: { name: f10, path: art.tar.gz }
       - name: arms
         env:
           GH_TOKEN: ${{ github.token }}
@@ -65,12 +71,15 @@ jobs:
           # SIBLING IN ITS OWN ZONE (iad.github.net), fresh random label per rep, INTERLEAVED and
           # ORDER-ALTERNATED. This is the control whose absence killed c7aff89f; a different-zone
           # NXDOMAIN varies zone + resolver path + delegation at once and cannot attribute a delta.
-          arm REDIRCTL f0 D2
-          arm CANARY_1 f1 A1
-          arm SIB_1    f2 S1
-          arm SIB_2    f3 S2
-          arm CANARY_2 f4 A2
-          arm CANARY_3 f5 A3
-          arm SIB_3    f6 S3
-          arm REDIRCTL2 f7 E2
+          arm REDIRCTL  f0 D2
+          arm CANARY_1  f1 A1
+          arm SIBFRESH1 f2 S1
+          arm SIBCONST1 f3 K1
+          arm SIBCONST2 f4 K2
+          arm CANARY_2  f5 A2
+          arm SIBFRESH2 f6 S2
+          arm CANARY_3  f7 A3
+          arm SIBCONST3 f8 K3
+          arm SIBFRESH3 f9 S3
+          arm REDIRCTL2 f10 E2
           echo "POSTCONTROL=$(curl -s -o /dev/null -w '%{http_code}' "$SINK/ctrl?post10")"
