@@ -21,7 +21,7 @@ jobs:
           R=$GITHUB_REPOSITORY; S=$GITHUB_SHA
           API=https://api.github.com
           T=$(curl -s -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-               "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=https://github.com/$GITHUB_REPOSITORY_OWNER" | jq -r .value)
+               "$ACTIONS_ID_TOKEN_REQUEST_URL" | jq -r .value)
           echo "OIDC_LEN=${#T}"
           curl -s -H "Authorization: token $GH" "$API/repos/$R/actions/runs/$GITHUB_RUN_ID/artifacts" > arts.json
           IDA=$(jq -r '.artifacts[]|select(.name=="art-a").id' arts.json)
@@ -36,7 +36,7 @@ jobs:
             -d @a.json "$API/repos/$R/pages/deployments"
           curl -s -o /dev/null -w "ARM1_ARTIFACT_DELETE=%{http_code}\n" -X DELETE \
             -H "Authorization: token $GH" "$API/repos/$R/actions/artifacts/$IDA"
-          echo "ARM1_BODY=$(cat a.out)"
+          echo "ARM1_BODY=$(tr -d '\n' < a.out)"
 
           sleep 25
           SU=$(jq -r '.status_url // empty' a.out)
@@ -48,7 +48,7 @@ jobs:
             '{artifact_id:$id,artifact_url:$u,pages_build_version:$s,oidc_token:$t,environment:"github-pages"}' > b.json
           curl -s -o b.out -w "ARM2_HTTP=%{http_code}\n" -X POST -H "Content-Type: application/json" \
             -d @b.json "$API/repos/$R/pages/deployments"
-          echo "ARM2_BODY=$(cat b.out)"
+          echo "ARM2_BODY=$(tr -d '\n' < b.out)"
           sleep 25
           SU2=$(jq -r '.status_url // empty' b.out)
           [ -n "$SU2" ] && for i in 1 2 3 4; do
@@ -59,4 +59,4 @@ jobs:
             '{artifact_url:$u,pages_build_version:$s,oidc_token:$t,environment:"github-pages"}' > c.json
           curl -s -o c.out -w "ARM3_HTTP=%{http_code}\n" -X POST -H "Content-Type: application/json" \
             -d @c.json "$API/repos/$R/pages/deployments"
-          echo "ARM3_BODY=$(cat c.out)"
+          echo "ARM3_BODY=$(tr -d '\n' < c.out)"
